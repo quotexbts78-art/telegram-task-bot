@@ -1,11 +1,13 @@
+# bot.py
 import telebot
 from telebot import types
 import os
 import json
 
-# -------------------------------------
-# ENVIRONMENT VARIABLES
-# -------------------------------------
+# start small web server so hosting platform can health-check
+from keep_alive import keep_alive
+
+# ---------------- ENV ----------------
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
@@ -17,15 +19,16 @@ if not ADMIN_ID:
 ADMIN_ID = int(ADMIN_ID)
 bot = telebot.TeleBot(TOKEN)
 
-# -------------------------------------
-# JSON FILE HANDLING
-# -------------------------------------
+# ---------------- JSON helpers ----------------
 def load_json(filename):
     if not os.path.exists(filename):
         with open(filename, "w") as f:
             f.write("{}")
     with open(filename, "r") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except:
+            return {}
 
 def save_json(filename, data):
     with open(filename, "w") as f:
@@ -35,9 +38,7 @@ users = load_json("users.json")
 tasks = load_json("tasks.json")
 pending = load_json("pending.json")
 
-# -------------------------------------
-# LANGUAGE MESSAGES
-# -------------------------------------
+# ---------------- MESSAGES ----------------
 MESSAGES = {
     "Hindi": {
         "welcome": "👋 स्वागत है! एक विकल्प चुनें:",
@@ -63,43 +64,32 @@ MESSAGES = {
     }
 }
 
-# -------------------------------------
-# USER REGISTRATION
-# -------------------------------------
+# ---------------- USER registration ----------------
 def register_user(user_id):
     if str(user_id) not in users:
         users[str(user_id)] = {
             "points": 0,
             "language": "Hindi",
-            "withdraw": []
+            "withdraw": [],
+            "current_task": 0
         }
         save_json("users.json", users)
 
-# -------------------------------------
-# MAIN MENU
-# -------------------------------------
+# ---------------- MAIN MENU ----------------
 def main_menu(lang):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    if lang == "Hindi":
-        markup.add("📋 Tasks", "💰 Balance")
-        markup.add("📤 Withdraw", "🌐 Language")
-    else:
-        markup.add("📋 Tasks", "💰 Balance")
-        markup.add("📤 Withdraw", "🌐 Language")
+    markup.add("📋 Tasks", "💰 Balance")
+    markup.add("📤 Withdraw", "🌐 Language")
     return markup
 
-# -------------------------------------
-# START COMMAND
-# -------------------------------------
+# ---------------- /start ----------------
 @bot.message_handler(commands=['start'])
 def start(message):
     register_user(message.chat.id)
     lang = users[str(message.chat.id)]["language"]
     bot.send_message(message.chat.id, MESSAGES[lang]["welcome"], reply_markup=main_menu(lang))
 
-# -------------------------------------
-# LANGUAGE CHANGE
-# -------------------------------------
+# ---------------- Language ----------------
 @bot.message_handler(func=lambda m: m.text == "🌐 Language")
 def change_language(message):
     markup = types.InlineKeyboardMarkup()
@@ -115,13 +105,9 @@ def set_language(call):
     users[str(call.message.chat.id)]["language"] = lang
     save_json("users.json", users)
     bot.answer_callback_query(call.id, MESSAGES[lang]["language_updated"])
-    
-    # Send updated menu
     bot.send_message(call.message.chat.id, MESSAGES[lang]["welcome"], reply_markup=main_menu(lang))
 
-# -------------------------------------
-# SHOW BALANCE
-# -------------------------------------
+# ---------------- Balance ----------------
 @bot.message_handler(func=lambda m: m.text == "💰 Balance")
 def balance(message):
     user_id = str(message.chat.id)
@@ -129,28 +115,56 @@ def balance(message):
     pts = users[user_id]["points"]
     bot.send_message(message.chat.id, MESSAGES[lang]["balance"].format(points=pts))
 
-# -------------------------------------
-# TASKS LIST
-# -------------------------------------
+# ---------------- Tasks (one by one) ----------------
 @bot.message_handler(func=lambda m: m.text == "📋 Tasks")
-def show_tasks(message):
-    lang = users[str(message.chat.id)]["language"]
-    if len(tasks) == 0:
+def show_task_one_by_one(message):
+    user_id = str(message.chat.id)
+    register_user(message.chat.id)
+    users[user_id]["current_task"] = 0
+    save_json("users.json", users)
+    send_task_by_index(message, 0)
+
+def send_task_by_index(message, index):
+    user_id = str(message.chat.id)
+    lang = users[user_id]["language"]
+    task_ids = list(tasks.keys())
+
+    if len(task_ids) == 0:
         bot.send_message(message.chat.id, MESSAGES[lang]["no_tasks"])
         return
-    for task_id, task in tasks.items():
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("🔗 Open Link", url=task["link"]),
-            types.InlineKeyboardButton("📤 Upload Screenshot", callback_data=f"upload_{task_id}")
-        )
-        bot.send_message(message.chat.id,
-                         f"📝 Task: {task['title']}\nReward: +1 point",
-                         reply_markup=markup)
 
-# -------------------------------------
-# HANDLE SCREENSHOT UPLOAD
-# -------------------------------------
+    if index >= len(task_ids):
+        bot.send_message(message.chat.id, "No more tasks.")
+        return
+
+    task_id = task_ids[index]
+    task = tasks[task_id]
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🔗 Open Link", url=task["link"]),
+        types.InlineKeyboardButton("📤 Upload Screenshot", callback_data=f"upload_{task_id}")
+    )
+
+    if index + 1 < len(task_ids):
+        markup.add(types.InlineKeyboardButton("➡ Next Task", callback_data=f"next_{index+1}"))
+
+    bot.send_message(
+        message.chat.id,
+        f"📝 Task: {task['title']}\nReward: +1 point",
+        reply_markup=markup
+    )
+
+    users[user_id]["current_task"] = index
+    save_json("users.json", users)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("next_"))
+def next_task(call):
+    index = int(call.data.split("_")[1])
+    send_task_by_index(call.message, index)
+    bot.answer_callback_query(call.id)
+
+# ---------------- Upload flow ----------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("upload_"))
 def ask_screenshot(call):
     task_id = call.data.split("_")[1]
@@ -173,9 +187,7 @@ def receive_screenshot(message, task_id):
     bot.send_message(ADMIN_ID,
                      f"📥 New submission pending\nUser: {message.chat.id}\nTask: {task_id}")
 
-# -------------------------------------
-# WITHDRAW OPTION
-# -------------------------------------
+# ---------------- Withdraw ----------------
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw")
 def withdraw(message):
     lang = users[str(message.chat.id)]["language"]
@@ -192,9 +204,7 @@ def save_withdraw(message):
     bot.send_message(ADMIN_ID,
                      f"💸 New withdraw request\nUser: {user}\nUPI: {upi}")
 
-# -------------------------------------
-# ADMIN PANEL
-# -------------------------------------
+# ---------------- Admin panel ----------------
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.chat.id != ADMIN_ID:
@@ -205,9 +215,6 @@ def admin_panel(message):
     markup.add("⬅ Back")
     bot.send_message(message.chat.id, "Admin Panel:", reply_markup=markup)
 
-# -------------------------------------
-# ADD TASK (ADMIN)
-# -------------------------------------
 @bot.message_handler(func=lambda m: m.text == "➕ Add Task")
 def add_task_title(message):
     if message.chat.id != ADMIN_ID:
@@ -227,9 +234,6 @@ def save_task(message, title):
     save_json("tasks.json", tasks)
     bot.send_message(message.chat.id, "✅ Task added successfully!")
 
-# -------------------------------------
-# REMOVE TASK
-# -------------------------------------
 @bot.message_handler(func=lambda m: m.text == "🗑 Remove Task")
 def remove_task(message):
     if message.chat.id != ADMIN_ID:
@@ -246,9 +250,6 @@ def delete_task(message):
     else:
         bot.send_message(message.chat.id, "Invalid Task ID.")
 
-# -------------------------------------
-# APPROVE SCREENSHOTS
-# -------------------------------------
 @bot.message_handler(func=lambda m: m.text == "✔ Approve Screenshots")
 def approve_panel(message):
     if message.chat.id != ADMIN_ID:
@@ -256,7 +257,7 @@ def approve_panel(message):
     if len(pending) == 0:
         bot.send_message(message.chat.id, "No pending submissions.")
         return
-    for pid, item in pending.items():
+    for pid, item in list(pending.items()):
         markup = types.InlineKeyboardMarkup()
         markup.add(
             types.InlineKeyboardButton("✔ Approve", callback_data=f"ok_{pid}"),
@@ -288,8 +289,9 @@ def handle_approval(call):
     save_json("pending.json", pending)
     save_json("users.json", users)
 
-# -------------------------------------
-# BOT LOOP
-# -------------------------------------
-print("BOT IS RUNNING...")
-bot.infinity_polling()
+# ---------------- START server + bot ----------------
+if __name__ == "__main__":
+    # start webserver for health checks
+    keep_alive()
+    print("BOT IS RUNNING...")
+    bot.infinity_polling()

@@ -2,20 +2,21 @@ import os
 import json
 from traceback import format_exc
 from flask import Flask, request
+
 import telebot
 from telebot import types
 
 # ---------------- ENVIRONMENT -----------------
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render URL (must end with /webhook)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # MUST end with /webhook
 
 if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable.")
 if not ADMIN_ID:
     raise RuntimeError("Missing ADMIN_ID environment variable.")
 if not WEBHOOK_URL:
-    raise RuntimeError("Missing WEBHOOK_URL environment variable.")
+    raise RuntimeError("Missing WEBHOOK_URL env variable.")
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -30,17 +31,15 @@ DATA_FILES = {
 }
 
 def safe_load(filename):
-    if not os.path.exists(filename):
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-        return {}
-
     try:
+        if not os.path.exists(filename):
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump({}, f)
+            return {}
         with open(filename, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
-    except:
-        os.rename(filename, filename + ".bak")
+    except Exception:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump({}, f)
         return {}
@@ -81,9 +80,8 @@ MESSAGES = {
 
 # ---------------- HELPERS ----------------
 def register_user(uid):
-    key = str(uid)
-    if key not in users:
-        users[key] = {
+    if str(uid) not in users:
+        users[str(uid)] = {
             "points": 0,
             "language": "Hindi",
             "withdraw": [],
@@ -168,8 +166,11 @@ def send_task(chat_id, index):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("next_"))
 def next_task(call):
-    index = int(call.data.split("_")[1])
-    send_task(call.message.chat.id, index)
+    try:
+        index = int(call.data.split("_")[1])
+        send_task(call.message.chat.id, index)
+    except:
+        pass
     bot.answer_callback_query(call.id)
 
 # ---------------- SCREENSHOT UPLOAD ----------------
@@ -223,7 +224,7 @@ def save_withdraw(message):
     except:
         pass
 
-# ---------------- ADMIN PANEL ----------------
+# ---------------- ADMIN ----------------
 @bot.message_handler(commands=["admin"])
 def admin(message):
     if message.chat.id != ADMIN_ID:
@@ -235,23 +236,23 @@ def admin(message):
     kb.add("⬅ Back")
     bot.send_message(message.chat.id, "Admin Panel:", reply_markup=kb)
 
-# ---------------- FLASK WEBHOOK ----------------
+# ---------------- WEBHOOK ----------------
 @app.route("/", methods=["GET"])
 def home():
     return "Bot Running via Webhook!", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.headers.get("content-type") == "application/json":
-        json_str = request.get_data().decode("UTF-8")
-        update = telebot.types.Update.de_json(json_str)
+    try:
+        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
         bot.process_new_updates([update])
-        return "OK", 200  # 🔥 FIXED INDENT BUG
-
-    return "Invalid", 400
+    except Exception as e:
+        print("\nWEBHOOK ERROR:", e)
+        print(format_exc())
+    return "OK", 200
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
+    bot.set_webhook(WEBHOOK_URL)
     app.run(host="0.0.0.0", port=10000)
